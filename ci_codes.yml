@@ -1,0 +1,36 @@
+# spring-microservices-kubernetes-manifests/payment-service/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service-deployment
+  labels:
+    app: payment-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+      - name: payment-service
+        image: 132464628555.dkr.ecr.ap-northeast-2.amazonaws.com/kubepay/kubepay:latest
+        ports:
+        - containerPort: 8080
+---
+# spring-microservices-kubernetes-manifests/payment-service/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service-service
+spec:
+  selector:
+    app: payment-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: LoadBalancer
