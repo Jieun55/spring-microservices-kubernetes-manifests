@@ -1,0 +1,85 @@
+name: Payment Service CI/CD to EKS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'payment-service/**' # payment-service 코드 변경 시에만 실행
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    env:
+      SERVICE_NAME: payment-service # 빌드할 서비스 이름
+      ECR_REPO_NAME: kubepay # ECR 레포지토리 이름
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        
+    - name: Set Image Tag
+      id: set_tag
+      run: |
+        # Git SHA를 이미지 태그로 사용. 고유성과 불변성 확보.
+        IMAGE_TAG=${{ github.sha }}
+        echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    # --- AWS ECR 인증 및 이미지 푸시 ---
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+      
+    - name: Build and Push Docker Image with Jib
+      run: |
+        # Jib을 사용하여 Jar를 빌드하고 ECR에 바로 푸시
+        ./gradlew :${{ env.SERVICE_NAME }}:jib \
+          -Djib.to.image=${{ secrets.ECR_REGISTRY }}/${{ env.ECR_REPO_NAME }}:${{ steps.set_tag.outputs.image_tag }} \
+          -Djib.to.auth.username=AWS \
+          -Djib.to.auth.password=${{ steps.login-ecr.outputs.password }}
+
+    # --- GitOps Manifests 레포지토리 업데이트 ---
+    - name: Checkout Manifest Repository
+      uses: actions/checkout@v4
+      with:
+        # 2단계에서 만든 GitOps 레포지토리 이름으로 변경하세요.
+        repository: ${{ secrets.MANIFESTS_REPO }} 
+        token: ${{ secrets.GH_TOKEN }} # PAT 사용
+        path: manifests-repo
+        
+    - name: Update Kubernetes Manifest Image Tag
+      run: |
+        # sed 명령으로 deployment.yaml 파일 내의 이미지 태그를 업데이트합니다.
+        cd manifests-repo/${{ env.SERVICE_NAME }}
+        
+        # YOUR_ECR_REGISTRY_URL/kubepay:latest-placeholder 부분을 실제 태그로 대체
+        NEW_IMAGE="${{ secrets.ECR_REGISTRY }}/${{ env.ECR_REPO_NAME }}:${{ steps.set_tag.outputs.image_tag }}"
+        
+        # sed를 사용하여 image: 다음에 오는 값을 변경
+        # gnu sed (linux) 사용 시: sed -i "s|image: .*|image: ${NEW_IMAGE}|" deployment.yaml
+        sed -i 's|image: .*|image: '"${NEW_IMAGE}"'|g' deployment.yaml
+        
+    - name: Commit and Push to Manifest Repository
+      run: |
+        cd manifests-repo
+        # github-actions[bot]으로 커밋하여 ArgoCD가 감지하도록 합니다.
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add .
+        git commit -m "CD: Update ${{ env.SERVICE_NAME }} image to ${{ steps.set_tag.outputs.image_tag }}" || echo "No changes to commit"
+        git push origin main
